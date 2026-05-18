@@ -78,8 +78,15 @@ export default {
         redirect: "follow",
       });
 
-      // 删除可能导致目标服务器拒绝的 header
+      // 删除可能暴露用户真实地理位置和客户端特征的 header
       newRequest.headers.delete("host");
+      newRequest.headers.delete("cf-connecting-ip");
+      newRequest.headers.delete("cf-ipcountry");
+      newRequest.headers.delete("cf-ray");
+      newRequest.headers.delete("cf-visitor");
+      newRequest.headers.delete("x-forwarded-for");
+      newRequest.headers.delete("x-forwarded-proto");
+      newRequest.headers.delete("x-real-ip");
 
       try {
         const response = await fetch(newRequest);
