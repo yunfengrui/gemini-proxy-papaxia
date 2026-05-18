@@ -1,121 +1,100 @@
 export default {
-	async fetch(request, env, ctx) {
-	  if (request.headers.get("Upgrade") !== "websocket") {
-		return new Response("Expected WebSocket connection", { status: 400 });
-	  }
-  
-	  const url = new URL(request.url);
-	  const pathAndQuery = url.pathname + url.search;
-	  const targetUrl = `wss://generativelanguage.googleapis.com${pathAndQuery}`;
-	  
-	  console.log('Target URL:', targetUrl);
-  
-	  const [client, proxy] = new WebSocketPair();
-	  proxy.accept();
-  
-	  // 用于存储在连接建立前收到的消息
-	  let pendingMessages = [];
-  
-	  const connectPromise = new Promise((resolve, reject) => {
-		const targetWebSocket = new WebSocket(targetUrl);
-  
-		console.log('Initial targetWebSocket readyState:', targetWebSocket.readyState);
-  
-		targetWebSocket.addEventListener("open", () => {
-		  console.log('Connected to target server');
-		  console.log('targetWebSocket readyState after open:', targetWebSocket.readyState);
-		  
-		  // 连接建立后，发送所有待处理的消息
-		  console.log(`Processing ${pendingMessages.length} pending messages`);
-		  for (const message of pendingMessages) {
-			try {
-			  targetWebSocket.send(message);
-			  console.log('Sent pending message:', message.slice(0, 100));
-			} catch (error) {
-			  console.error('Error sending pending message:', error);
-			}
-		  }
-		  pendingMessages = []; // 清空待处理消息队列
-		  resolve(targetWebSocket);
-		});
-  
-		proxy.addEventListener("message", async (event) => {
-		  console.log('Received message from client:', {
-			dataPreview: typeof event.data === 'string' ? event.data.slice(0, 200) : 'Binary data',
-			dataType: typeof event.data,
-			timestamp: new Date().toISOString()
-		  });
-		  
-		  if (targetWebSocket.readyState === WebSocket.OPEN) {
-			try {
-			  targetWebSocket.send(event.data);
-			  console.log('Successfully sent message to gemini');
-			} catch (error) {
-			  console.error('Error sending to gemini:', error);
-			}
-		  } else {
-			// 如果连接还未建立，将消息加入待处理队列
-			console.log('Connection not ready, queueing message');
-			pendingMessages.push(event.data);
-		  }
-		});
-  
-		targetWebSocket.addEventListener("message", (event) => {
-		  console.log('Received message from gemini:', {
-			dataPreview: typeof event.data === 'string' ? event.data.slice(0, 200) : 'Binary data',
-			dataType: typeof event.data,
-			timestamp: new Date().toISOString()
-		  });
-		  
-		  try {
-			if (proxy.readyState === WebSocket.OPEN) {
-			  proxy.send(event.data);
-			  console.log('Successfully forwarded message to client');
-			}
-		  } catch (error) {
-			console.error('Error forwarding to client:', error);
-		  }
-		});
-  
-		targetWebSocket.addEventListener("close", (event) => {
-		  console.log('Gemini connection closed:', {
-			code: event.code,
-			reason: event.reason || 'No reason provided',
-			wasClean: event.wasClean,
-			timestamp: new Date().toISOString(),
-			readyState: targetWebSocket.readyState
-		  });
-		  if (proxy.readyState === WebSocket.OPEN) {
-			proxy.close(event.code, event.reason);
-		  }
-		});
-  
-		proxy.addEventListener("close", (event) => {
-		  console.log('Client connection closed:', {
-			code: event.code,
-			reason: event.reason || 'No reason provided',
-			wasClean: event.wasClean,
-			timestamp: new Date().toISOString()
-		  });
-		  if (targetWebSocket.readyState === WebSocket.OPEN) {
-			targetWebSocket.close(event.code, event.reason);
-		  }
-		});
-  
-		targetWebSocket.addEventListener("error", (error) => {
-		  console.error('Gemini WebSocket error:', {
-			error: error.message || 'Unknown error',
-			timestamp: new Date().toISOString(),
-			readyState: targetWebSocket.readyState
-		  });
-		});
-	  });
-  
-	  ctx.waitUntil(connectPromise);
-  
-	  return new Response(null, {
-		status: 101,
-		webSocket: client,
-	  });
-	},
-  };
+  async fetch(request, env, ctx) {
+    // 处理 OPTIONS 预检请求 (CORS)
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers": "*",
+        },
+      });
+    }
+
+    const url = new URL(request.url);
+    const pathAndQuery = url.pathname + url.search;
+
+    // 1. 处理 WebSocket 请求 (原来的逻辑)
+    if (request.headers.get("Upgrade") === "websocket") {
+      const targetUrl = `wss://generativelanguage.googleapis.com${pathAndQuery}`;
+      console.log('Target WS URL:', targetUrl);
+
+      const [client, proxy] = new WebSocketPair();
+      proxy.accept();
+
+      let pendingMessages = [];
+
+      const connectPromise = new Promise((resolve, reject) => {
+        const targetWebSocket = new WebSocket(targetUrl);
+
+        targetWebSocket.addEventListener("open", () => {
+          for (const message of pendingMessages) {
+            try { targetWebSocket.send(message); } catch (error) { console.error(error); }
+          }
+          pendingMessages = [];
+          resolve(targetWebSocket);
+        });
+
+        proxy.addEventListener("message", async (event) => {
+          if (targetWebSocket.readyState === WebSocket.OPEN) {
+            targetWebSocket.send(event.data);
+          } else {
+            pendingMessages.push(event.data);
+          }
+        });
+
+        targetWebSocket.addEventListener("message", (event) => {
+          if (proxy.readyState === WebSocket.OPEN) {
+            proxy.send(event.data);
+          }
+        });
+
+        targetWebSocket.addEventListener("close", (event) => {
+          if (proxy.readyState === WebSocket.OPEN) proxy.close(event.code, event.reason);
+        });
+
+        proxy.addEventListener("close", (event) => {
+          if (targetWebSocket.readyState === WebSocket.OPEN) targetWebSocket.close(event.code, event.reason);
+        });
+      });
+
+      ctx.waitUntil(connectPromise);
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      });
+    } 
+    // 2. 处理普通的 HTTP 请求 (如 generateContent)
+    else {
+      const targetUrl = `https://generativelanguage.googleapis.com${pathAndQuery}`;
+      console.log('Target HTTP URL:', targetUrl);
+
+      // 构建发往 Gemini 的请求
+      const newRequest = new Request(targetUrl, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        redirect: "follow",
+      });
+
+      // 删除可能导致目标服务器拒绝的 header
+      newRequest.headers.delete("host");
+
+      try {
+        const response = await fetch(newRequest);
+        
+        // 构造带有 CORS 的响应
+        const newResponse = new Response(response.body, response);
+        newResponse.headers.set("Access-Control-Allow-Origin", "*");
+        
+        return newResponse;
+      } catch (error) {
+        return new Response(JSON.stringify({ error: error.message }), { 
+          status: 500,
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+        });
+      }
+    }
+  },
+};
